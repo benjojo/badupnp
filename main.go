@@ -1,8 +1,11 @@
 package main
 
 import (
+	"embed"
 	"flag"
 	"fmt"
+	"io/fs"
+	"log"
 	"net"
 	"net/http"
 	"os"
@@ -34,21 +37,25 @@ func init() {
 	flag.StringVar(&ssdpST, "s", "ssdp:all", "ssdp ST")
 }
 
+//go:embed public/*
+var publicDir embed.FS
+
 func main() {
 	flag.Parse()
 
 	addr, err := net.ResolveUDPAddr(protocol, listenAddr)
 	if err != nil {
-		panic(err)
+		log.Fatalf("Failed to listen: %v", err)
 	}
 
 	conn, err = net.ListenUDP(protocol, addr)
 	if err != nil {
-		panic(err)
+		log.Fatalf("Failed to listen: %v", err)
 	}
 
-	fs := http.FileServer(http.Dir("public"))
-	http.Handle("/", fs)
+	publicDirMinusPublic, _ := fs.Sub(publicDir, "public")
+	servablePublicDir := http.FS(publicDirMinusPublic)
+	http.Handle("/", http.FileServer(servablePublicDir))
 
 	http.HandleFunc("/test", testClient)
 
