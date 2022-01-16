@@ -1,6 +1,8 @@
 package main
 
 import (
+	"context"
+	"crypto/tls"
 	"embed"
 	"flag"
 	"fmt"
@@ -13,6 +15,9 @@ import (
 	"strings"
 	"sync"
 	"time"
+
+	"golang.org/x/crypto/acme"
+	"golang.org/x/crypto/acme/autocert"
 )
 
 // A web version of Marek's script
@@ -22,20 +27,26 @@ var (
 	SERVER_RE     = regexp.MustCompile("(?i)server: ?([^\r\n]*)[\r\n]")
 	ST_RE         = regexp.MustCompile("(?i)st: ?([^\r\n]*)[\r\n]")
 
-	listenAddr     string
-	httplistenAddr string
-	protocol       string
-	ssdpST         string
-	cloudflareMode bool
-	conn           *net.UDPConn
-	nrequestchan   chan notifyRequest
+	listenAddr      string
+	httplistenAddr  string
+	httpslistenAddr string
+	protocol        string
+	ssdpST          string
+	cloudflareMode  bool
+	tlsHostname     string
+	acmeEMail       string
+	conn            *net.UDPConn
+	nrequestchan    chan notifyRequest
 )
 
 func init() {
 	flag.StringVar(&listenAddr, "udplisten", "0.0.0.0:0", "Listen address")
-	flag.StringVar(&httplistenAddr, "httplisten", "0.0.0.0:753", "Listen address")
+	flag.StringVar(&httplistenAddr, "httplisten", "0.0.0.0:80", "Listen address")
+	flag.StringVar(&httpslistenAddr, "httpslisten", "0.0.0.0:443", "Listen address")
 	flag.StringVar(&protocol, "p", "udp", "udp/udp4/udp6")
 	flag.BoolVar(&cloudflareMode, "cf", false, "Cloudflare header mode")
+	flag.StringVar(&tlsHostname, "tls.name", "badupnp.benjojo.co.uk", "What TLS hostname to request from let's encrypt")
+	flag.StringVar(&acmeEMail, "acme.email", "", "")
 }
 
 //go:embed public/*
@@ -43,6 +54,9 @@ var publicDir embed.FS
 
 func main() {
 	flag.Parse()
+	if acmeEMail == "" {
+		log.Fatalf("Set -acme.email")
+	}
 
 	addr, err := net.ResolveUDPAddr(protocol, listenAddr)
 	if err != nil {
@@ -54,16 +68,69 @@ func main() {
 		log.Fatalf("Failed to listen: %v", err)
 	}
 
-	publicDirMinusPublic, _ := fs.Sub(publicDir, "public")
-	servablePublicDir := http.FS(publicDirMinusPublic)
-	http.Handle("/", http.FileServer(servablePublicDir))
-
-	http.HandleFunc("/test", testClient)
-
 	nrequestchan = make(chan notifyRequest)
 	go resultCollector(nrequestchan)
 
-	fmt.Printf("Failed to start, %s", http.ListenAndServe(httplistenAddr, nil).Error())
+	publicDirMinusPublic, _ := fs.Sub(publicDir, "public")
+	servablePublicDir := http.FS(publicDirMinusPublic)
+
+	mux := http.NewServeMux()
+	mux.Handle("/", http.FileServer(servablePublicDir))
+	mux.HandleFunc("/test", testClient)
+	httpsSrv := http.Server{
+		ReadTimeout:  10 * time.Second,
+		WriteTimeout: 300 * time.Second,
+		IdleTimeout:  120 * time.Second,
+		Handler:      mux,
+	}
+
+	m := &autocert.Manager{
+		Prompt: autocert.AcceptTOS,
+		HostPolicy: func(ctx context.Context, host string) error {
+			if host == tlsHostname {
+				return nil
+			}
+			return fmt.Errorf("Hostname %s is not an allowed hostname", host)
+		},
+		Cache: autocert.DirCache("."),
+		Email: acmeEMail,
+		Client: &acme.Client{
+			DirectoryURL: "https://api.buypass.com/acme/directory",
+		},
+	}
+	httpsSrv.TLSConfig = &tls.Config{GetCertificate: m.GetCertificate}
+
+	go func() {
+		mux := http.NewServeMux()
+		mux.HandleFunc("/", func(rw http.ResponseWriter, r *http.Request) {
+			// remove/add not default ports from req.Host
+			target := "https://" + r.Host + r.URL.Path
+			if len(r.URL.RawQuery) > 0 {
+				target += "?" + r.URL.RawQuery
+			}
+			ipaddr := r.Header.Get("CF-Connecting-IP")
+
+			if ipaddr != "" {
+				log.Printf("redirect (CF) to: %s", target)
+			} else {
+				log.Printf("redirect to: %s", target)
+			}
+			http.Redirect(rw, r, target,
+				// see @andreiavrammsd comment: often 307 > 301
+				http.StatusTemporaryRedirect)
+		})
+		s := &http.Server{
+			Handler: m.HTTPHandler(mux),
+			Addr:    httplistenAddr,
+		}
+
+		go s.ListenAndServe()
+	}()
+
+	err = httpsSrv.ListenAndServeTLS("", "")
+	if err != nil {
+		log.Fatalf("httpsSrv.ListendAndServeTLS() failed with %s", err)
+	}
 }
 
 type notifyRequest struct {
