@@ -26,6 +26,7 @@ var (
 	httplistenAddr string
 	protocol       string
 	ssdpST         string
+	cloudflareMode bool
 	conn           *net.UDPConn
 	nrequestchan   chan notifyRequest
 )
@@ -34,7 +35,7 @@ func init() {
 	flag.StringVar(&listenAddr, "udplisten", "0.0.0.0:0", "Listen address")
 	flag.StringVar(&httplistenAddr, "httplisten", "0.0.0.0:753", "Listen address")
 	flag.StringVar(&protocol, "p", "udp", "udp/udp4/udp6")
-	flag.StringVar(&ssdpST, "s", "ssdp:all", "ssdp ST")
+	flag.BoolVar(&cloudflareMode, "cf", false, "Cloudflare header mode")
 }
 
 //go:embed public/*
@@ -73,9 +74,14 @@ type notifyRequest struct {
 func testClient(w http.ResponseWriter, rw *http.Request) {
 	SSDP_SEARCH := []byte(fmt.Sprintf(SSDP_SEARCH_P, ssdpST))
 
-	ipaddr := rw.Header.Get("CF-Connecting-IP")
-	if strings.Contains(ipaddr, ":") {
-		ipaddr = fmt.Sprintf("[%s]", ipaddr)
+	ipaddr := rw.RemoteAddr
+	if cloudflareMode {
+		ipaddr = rw.Header.Get("CF-Connecting-IP")
+		if strings.Contains(ipaddr, ":") {
+			ipaddr = fmt.Sprintf("[%s]", ipaddr)
+		}
+	} else {
+		ipaddr, _, _ = net.SplitHostPort(ipaddr)
 	}
 
 	addr, err := net.ResolveUDPAddr(protocol, fmt.Sprintf("%s:1900", ipaddr))
