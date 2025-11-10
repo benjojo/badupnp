@@ -16,7 +16,6 @@ import (
 	"sync"
 	"time"
 
-	"golang.org/x/crypto/acme"
 	"golang.org/x/crypto/acme/autocert"
 )
 
@@ -94,9 +93,6 @@ func main() {
 		},
 		Cache: autocert.DirCache("."),
 		Email: acmeEMail,
-		Client: &acme.Client{
-			DirectoryURL: "https://api.buypass.com/acme/directory",
-		},
 	}
 	httpsSrv.TLSConfig = &tls.Config{GetCertificate: m.GetCertificate}
 
